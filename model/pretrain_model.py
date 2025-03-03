@@ -7,6 +7,7 @@ from rtdl_revisiting_models import FTTransformer
 from typing import Tuple, List
 from helper import dotdict
 import numpy as np
+import torchmetrics
 
 
 class CLIPLoss(torch.nn.Module):
@@ -38,7 +39,13 @@ class CLIPLoss(torch.nn.Module):
 
         # logits = torch.matmul(out0, out1.T) * torch.exp(torch.tensor(self.temperature))
         logits = torch.matmul(out0, out1.T) / self.temperature
-        labels = torch.arange(len(out0), device=out0.device)
+        if indices is None:
+            labels = torch.arange(len(out0), device=out0.device)
+        else:
+            # Convert the caseid list to tensor
+            indices_tensor = torch.tensor(indices, device=out0.device)
+            _, inverse_indices = torch.unique(indices_tensor, sorted=True, return_inverse=True)
+            labels = inverse_indices
 
         loss_0 = self.lambda_0 * self.cross_entropy(logits, labels)
         loss_1 = self.lambda_1 * self.cross_entropy(logits.T, labels)
@@ -110,7 +117,7 @@ class Net(nn.Module):
             self.arch = cfg.arch
 
         # out dim = [batch_size, 2048, x, x]  x vary with image shape
-        self.decoder_image =  timm.create_model('resnet50d', pretrained=pretrained,
+        self.decoder_image =  timm.create_model(self.arch, pretrained=pretrained,
                                                 in_chans=1, num_classes=0, global_pool='')
 
         self.decoder_tab = FTTransformer( # out dim = [2, d_block]
@@ -118,28 +125,27 @@ class Net(nn.Module):
         cat_cardinalities=cfg.cat_cardinalities,
         d_out= None, # neglect final linear layer
         n_blocks=3,
-        d_block=2048,
+        d_block=cfg.d_block,
         attention_n_heads=8,
-        attention_dropout=0.2,
+        attention_dropout=0,
         ffn_d_hidden=None,
         ffn_d_hidden_multiplier=4 / 3,
-        ffn_dropout=0.1,
+        ffn_dropout=0,
         residual_dropout=0.0,
     )
-        self.emb_dim = 2048
+        self.emb_dim = 512
         # paper code:
-        self.projector_image = SimCLRProjectionHead(2048, self.emb_dim, 128)
-        self.projector_tab = SimCLRProjectionHead(self.emb_dim, self.emb_dim, 128)
+        self.projector_image = SimCLRProjectionHead(512, self.emb_dim, 128)
+        self.projector_tab = SimCLRProjectionHead(cfg.d_block, self.emb_dim, 128)
 
     def forward_image(self, batch):
         device = self.D.device
-        print(device)
-        image = batch['image'].to(device)
+        # print(device)
+        image = batch.to(device)
         emb_image = self.decoder_image(image)
         emb_image = F.adaptive_avg_pool2d(emb_image, (1, 1))
         emb_image = emb_image.view(emb_image.size(0), -1)
-        pro_image = self.projector_image(emb_image)
-        return pro_image
+        return emb_image
 
     def forward_tab(self, batch):
         device = self.D.device
@@ -147,14 +153,32 @@ class Net(nn.Module):
         cont_tab = batch['cont_tab'].to(device)
         cat_tab = batch['cat_tab'].to(device)
         emb_tab = self.decoder_tab(cont_tab, cat_tab)
-        pro_tab = self.projector_tab(emb_tab)
-        return pro_tab
+        return emb_tab
 
-
+    def forward_Cliploss(self, emb_image,emb_tab,indices: List[int] = None):
+        device = self.D.device
+        pro_image = self.projector_image(emb_image)
+        pro_tab = self.projector_tab(emb_tab.to(device))
+        lossfunction = CLIPLoss(temperature=0.1, lambda_0=0.5)
+        loss,logits,labels =lossfunction(pro_image,pro_tab,indices)
+        return loss,logits,labels
 
 def run_check_net():
+    def initialize_classifier_and_metrics(nclasses_train, nclasses_val,device):
+        """
+        Initializes classifier and metrics. Takes care to set correct number of classes for embedding similarity metric depending on loss.
+        """
+
+        # Accuracy calculated against all others in batch of same view except for self (i.e. -1) and all of the other view
+        top1_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_train).to(device)
+        top1_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_val).to(device)
+
+        top5_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_train).to(device)
+        top5_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_val).to(device)
+        return top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val
+
     # 定义批次大小
-    batch_size = 2
+    batch_size = 6
 
     # 连续型特征
     n_cont_features = 3
@@ -166,6 +190,7 @@ def run_check_net():
 
     # 生成类别特征
     x_cat = torch.stack([torch.randint(0, c, (batch_size,)) for c in cat_cardinalities], dim=1)
+    print(x_cat)
 
     # 断言确保数据正确性
     assert x_cat.dtype == torch.int64
@@ -200,10 +225,11 @@ def run_check_net():
 
     cfg = dotdict(
         n_cont_features = 3,
-        cat_cardinalities=[4, 7, 5],
-        arch = 'resnet50d'
+        cat_cardinalities=cat_cardinalities,
+        arch = 'resnet34d',
+        d_block = 512
     )
-    image = torch.from_numpy(np.random.uniform(0, 1, (2, 1, 224, 224))).float()
+    image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 1, 224, 224))).float()
     batch = {
         'image': image,
         'cont_tab' : x_cont,
@@ -211,39 +237,19 @@ def run_check_net():
     }
 
     model = Net(True,cfg = cfg).to('cuda')
-    zi = model.forward_image(batch)
+    zi = model.forward_image(image)
     zt = model.forward_tab(batch)
-    print(zi.shape, zt.shape)
-    loss = CLIPLoss(temperature= 0.5)
-    lossv, logits, labels = loss.forward(zi,zt)
-    print(lossv, logits, labels)
+    # print(zi.shape, zt.shape)
+    # loss = CLIPLoss(temperature= 0.5)
+    lossv, logits, labels = model.forward_Cliploss(zi,zt)
+    print(lossv)
 
-    # projector_image = SimCLRProjectionHead(2048, 2048, 128)
-    # z = projector_image(o)
-    # print(z.shape)
-
-    # model = timm.create_model('resnet50d', pretrained=True,
-    #                   in_chans=1, num_classes=0, global_pool='')
-    #
-
-    # o = model(image)
-    # o = F.adaptive_avg_pool2d(o, (1, 1))  # GAP层
-    # o = o.view(o.size(0), -1)
-    # print(o.shape)
-    # projector_image = SimCLRProjectionHead(2048, 2048, 128)
-    # z = projector_image(o)
-    # print(z.shape)
-
-    # In the paper, some of FT-Transformer's parameters
-    # were protected from the weight decay regularization.
-    # There is a special method for doing that:
-    # optimizer = torch.optim.AdamW(
-    #     # Instead of model.parameters(),
-    #     model.make_parameter_groups(),
-    #     lr=1e-4,
-    #     weight_decay=1e-5,
-    # )
-
+    device = 'cuda'
+    top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val = initialize_classifier_and_metrics(batch_size,
+                                                                                                   batch_size,device)
+    acctop1 = top1_acc_train(logits,labels)
+    acctop5 = top5_acc_train(logits,labels)
+    print(f"acctop1:{acctop1}acctop5:{acctop5}")
 
 # main #################################################################
 if __name__ == '__main__':

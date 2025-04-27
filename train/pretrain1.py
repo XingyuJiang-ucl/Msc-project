@@ -183,6 +183,7 @@ def train_one_epoch(model, train_loader, embedding_tab, optimizer, scaler, DEVIC
 
     progress_bar = tqdm(total=len(train_loader), desc="Training", leave=False)
     for images, case_ids in train_loader:
+        images= images.repeat(1, 3, 1, 1)
         images = images.to(DEVICE)
         # Extract tabular embeddings for each case_id (create a new leaf tensor)
         batch_tab_emb_list = []
@@ -251,6 +252,7 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
     progress_bar = tqdm(total=len(val_loader), desc="Validation", leave=False)
     with torch.no_grad():
         for images, case_ids in val_loader:
+            images = images.repeat(1, 3, 1, 1)
             images = images.to(DEVICE)
             batch_tab_emb_list = []
             for cid in case_ids:
@@ -287,7 +289,7 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
 
 def train():
     current_dir = Path(__file__).resolve().parent
-    data_root = current_dir.parent / "2D Slices 256"
+    data_root = current_dir.parent / "2D Slices 224"
     keys_to_skip = {"case_id", "vital_status", "intraoperative_complications", "age_when_quit_smoking",
                     "intraoperative_complications", "comorbidities.myocardial_infarction","comorbidities.congestive_heart_failure",
                     "comorbidities.peripheral_vascular_disease","comorbidities.cerebrovascular_disease", "comorbidities.dementia",
@@ -331,10 +333,10 @@ def train():
       transforms.ToTensor(),
     ])
 
-    batchsize = 128
+    batchsize = 64
     batchsizeval = 128
     EPOCHS        = 100
-    LEARNING_RATE = 0.0003
+    LEARNING_RATE = 0.003
     DEVICE = torch.device('cuda')
 
     dataset_train = ImageDataset_1(train_image_json_file, train_image_root, transform=transform_train)
@@ -364,10 +366,17 @@ def train():
         collate_fn=collate_fn
     )
 
+    # cfg = dotdict(
+    #     n_cont_features = n_cont_features,
+    #     cat_cardinalities=cat_cardinalities,
+    #     arch = 'resnet34d',
+    #     d_block = 512,
+    # )
+
     cfg = dotdict(
         n_cont_features = n_cont_features,
         cat_cardinalities=cat_cardinalities,
-        arch = 'resnet34d',
+        arch = 'vision transformer',
         d_block = 512,
     )
 

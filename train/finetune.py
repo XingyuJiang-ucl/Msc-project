@@ -1,5 +1,6 @@
 import time
 
+from torch.nn.functional import sigmoid
 from torch.utils.data import DataLoader
 from Dataset.Dataset import ImageDataset_1
 from model.finetune_model import Net
@@ -429,7 +430,7 @@ def train():
         val_mse = val_one_epoch(model, val_loader, embedding_tab_val,label_val, DEVICE)
 
         elapsed = time.time() - start_time
-        print(f"Train Loss: {train_loss:.4f}  | Val MSE: {val_mse:.4f} | Time: {elapsed:.1f}s")
+        print(f"Train Loss: {train_loss:.4f}  | Train MSE: {train_mse:.4f} |Val MSE: {val_mse:.4f} | Time: {elapsed:.1f}s")
 
         # save pth if validation mse improve
         if val_mse < best_val_mse:

@@ -1,3 +1,5 @@
+import math
+
 import timm
 from torch import Tensor
 import torch
@@ -5,9 +7,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from rtdl_revisiting_models import FTTransformer
 from typing import Tuple, List
+
+from torch.xpu import device
+
 from helper import dotdict
 import numpy as np
 import torchmetrics
+from model.tiny_vit import tiny_vit_21m_224
 
 
 class CLIPLoss(torch.nn.Module):
@@ -40,18 +46,47 @@ class CLIPLoss(torch.nn.Module):
         # logits = torch.matmul(out0, out1.T) * torch.exp(torch.tensor(self.temperature))
         logits = torch.matmul(out0, out1.T) / self.temperature
         if indices is None:
-            labels = torch.arange(len(out0), device=out0.device)
+            # labels = torch.arange(len(out0), device=out0.device)
+            labels = torch.eye(len(out0),device = out0.device)
         else:
             # Convert the caseid list to tensor
             indices_tensor = torch.tensor(indices, device=out0.device)
             _, inverse_indices = torch.unique(indices_tensor, sorted=True, return_inverse=True)
             labels = inverse_indices
-
         loss_0 = self.lambda_0 * self.cross_entropy(logits, labels)
         loss_1 = self.lambda_1 * self.cross_entropy(logits.T, labels)
         loss = loss_0 + loss_1
 
+        labels = torch.arange(len(out0), device=out0.device)
+
         return loss, logits, labels
+
+class SiglipLoss(torch.nn.Module):
+    """
+    Loss function for multimodal contrastive learning based off of the SigLip paper.
+    """
+
+    def __init__(self) -> None:
+        super(SiglipLoss, self).__init__()
+
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(10.0)))
+        self.logit_bias  = nn.Parameter(torch.tensor(-10.0))
+
+    def forward(self, out0: torch.Tensor, out1: torch.Tensor, indices: List[int] = None) -> Tuple:
+        # normalize the embedding onto the unit hypersphere
+        out0 = nn.functional.normalize(out0, dim=1)
+        out1 = nn.functional.normalize(out1, dim=1)
+
+        logits = (torch.matmul(out0, out1.T) * self.logit_scale) + self.logit_bias
+
+        # labels = torch.arange(len(out0), device=out0.device)
+        labels = (2 * torch.eye(len(out0)) - torch.ones(len(out0))).to(out0.device)
+        loss = - torch.sum(F.logsigmoid(labels * logits),dim=1).mean()
+
+        labels = torch.arange(len(out0), device=out0.device)
+
+        return loss, logits, labels
+
 
 class SimCLRProjectionHead(nn.Module):
     """
@@ -116,9 +151,12 @@ class Net(nn.Module):
         if cfg.arch is not None:
             self.arch = cfg.arch
 
-        # out dim = [batch_size, 2048, x, x]  x vary with image shape
-        self.decoder_image =  timm.create_model(self.arch, pretrained=pretrained,
-                                                in_chans=1, num_classes=0, global_pool='')
+        if cfg.arch != 'vision transformer':
+            # out dim = [batch_size, 2048, x, x]  x vary with image shape
+            self.decoder_image =  timm.create_model(self.arch, pretrained=pretrained,
+                                                    in_chans=1, num_classes=0, global_pool='')
+        else:
+            self.decoder_image = tiny_vit_21m_224(pretrained=pretrained)
 
         self.decoder_tab = FTTransformer( # out dim = [2, d_block]
         n_cont_features= cfg.n_cont_features,
@@ -135,7 +173,7 @@ class Net(nn.Module):
     )
         self.emb_dim = 512
         # paper code:
-        self.projector_image = SimCLRProjectionHead(512, self.emb_dim, 128)
+        self.projector_image = SimCLRProjectionHead(1000, self.emb_dim, 128)
         self.projector_tab = SimCLRProjectionHead(cfg.d_block, self.emb_dim, 128)
 
     def forward_image(self, batch):
@@ -143,8 +181,11 @@ class Net(nn.Module):
         # print(device)
         image = batch.to(device)
         emb_image = self.decoder_image(image)
-        emb_image = F.adaptive_avg_pool2d(emb_image, (1, 1))
-        emb_image = emb_image.view(emb_image.size(0), -1)
+        # print(f'image:{emb_image.shape}')
+        if self.arch != 'vision transformer':
+            emb_image = F.adaptive_avg_pool2d(emb_image, (1, 1))
+            print(f'image after pool:{emb_image.shape}')
+            emb_image = emb_image.view(emb_image.size(0), -1)
         return emb_image
 
     def forward_tab(self, batch):
@@ -159,7 +200,8 @@ class Net(nn.Module):
         device = self.D.device
         pro_image = self.projector_image(emb_image)
         pro_tab = self.projector_tab(emb_tab.to(device))
-        lossfunction = CLIPLoss(temperature=0.1, lambda_0=0.5)
+        #lossfunction = CLIPLoss(temperature=0.1, lambda_0=0.5)
+        lossfunction = SiglipLoss()
         loss,logits,labels =lossfunction(pro_image,pro_tab,indices)
         return loss,logits,labels
 
@@ -226,10 +268,11 @@ def run_check_net():
     cfg = dotdict(
         n_cont_features = 3,
         cat_cardinalities=cat_cardinalities,
-        arch = 'resnet34d',
-        d_block = 512
+        arch = 'vision transformer',
+        d_block = 1000
     )
-    image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 1, 224, 224))).float()
+    #image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 1, 256, 256))).float()
+    image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 3, 224, 224))).float()
     batch = {
         'image': image,
         'cont_tab' : x_cont,
@@ -244,12 +287,18 @@ def run_check_net():
     lossv, logits, labels = model.forward_Cliploss(zi,zt)
     print(lossv)
 
-    device = 'cuda'
-    top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val = initialize_classifier_and_metrics(batch_size,
-                                                                                                   batch_size,device)
-    acctop1 = top1_acc_train(logits,labels)
-    acctop5 = top5_acc_train(logits,labels)
-    print(f"acctop1:{acctop1}acctop5:{acctop5}")
+
+    image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 3, 224, 224))).float()
+    # model = tiny_vit_21m_224(pretrained=True)
+    # output = model(image)
+    # print(output.shape)
+
+    # device = 'cuda'
+    # top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val = initialize_classifier_and_metrics(batch_size,
+    #                                                                                                batch_size,device)
+    # acctop1 = top1_acc_train(logits,labels)
+    # acctop5 = top5_acc_train(logits,labels)
+    # print(f"acctop1:{acctop1}acctop5:{acctop5}")
 
 # main #################################################################
 if __name__ == '__main__':

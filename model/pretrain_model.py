@@ -13,7 +13,7 @@ from torch.xpu import device
 from helper import dotdict
 import numpy as np
 import torchmetrics
-from model.tiny_vit import tiny_vit_21m_224
+from model.tiny_vit import tiny_vit_21m_224, tiny_vit_11m_224
 
 
 class CLIPLoss(torch.nn.Module):
@@ -154,9 +154,9 @@ class Net(nn.Module):
         if cfg.arch != 'vision transformer':
             # out dim = [batch_size, 2048, x, x]  x vary with image shape
             self.decoder_image =  timm.create_model(self.arch, pretrained=pretrained,
-                                                    in_chans=1, num_classes=0, global_pool='')
+                                                    in_chans=3, num_classes=0, global_pool='')
         else:
-            self.decoder_image = tiny_vit_21m_224(pretrained=pretrained)
+            self.decoder_image = tiny_vit_11m_224(pretrained=pretrained)
 
         self.decoder_tab = FTTransformer( # out dim = [2, d_block]
         n_cont_features= cfg.n_cont_features,
@@ -173,7 +173,7 @@ class Net(nn.Module):
     )
         self.emb_dim = 512
         # paper code:
-        self.projector_image = SimCLRProjectionHead(1000, self.emb_dim, 128)
+        self.projector_image = SimCLRProjectionHead(cfg.img_dim, self.emb_dim, 128)
         self.projector_tab = SimCLRProjectionHead(cfg.d_block, self.emb_dim, 128)
 
     def forward_image(self, batch):
@@ -184,7 +184,7 @@ class Net(nn.Module):
         # print(f'image:{emb_image.shape}')
         if self.arch != 'vision transformer':
             emb_image = F.adaptive_avg_pool2d(emb_image, (1, 1))
-            print(f'image after pool:{emb_image.shape}')
+            # print(f'image after pool:{emb_image.shape}')
             emb_image = emb_image.view(emb_image.size(0), -1)
         return emb_image
 
@@ -200,70 +200,32 @@ class Net(nn.Module):
         device = self.D.device
         pro_image = self.projector_image(emb_image)
         pro_tab = self.projector_tab(emb_tab.to(device))
-        #lossfunction = CLIPLoss(temperature=0.1, lambda_0=0.5)
-        lossfunction = SiglipLoss()
+        lossfunction = CLIPLoss(temperature=0.1, lambda_0=0.5)
+        # lossfunction = SiglipLoss()
         loss,logits,labels =lossfunction(pro_image,pro_tab,indices)
         return loss,logits,labels
 
 def run_check_net():
-    def initialize_classifier_and_metrics(nclasses_train, nclasses_val,device):
-        """
-        Initializes classifier and metrics. Takes care to set correct number of classes for embedding similarity metric depending on loss.
-        """
-
-        # Accuracy calculated against all others in batch of same view except for self (i.e. -1) and all of the other view
-        top1_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_train).to(device)
-        top1_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_val).to(device)
-
-        top5_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_train).to(device)
-        top5_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_val).to(device)
-        return top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val
-
-    # 定义批次大小
     batch_size = 6
 
-    # 连续型特征
+    # continuous features
     n_cont_features = 3
-    x_cont = torch.randn(batch_size, n_cont_features)  # 生成随机连续特征
+    x_cont = torch.randn(batch_size, n_cont_features)  # Generate random continuous features
 
-    # 类别型特征及其基数(可能的类别数)
-    cat_cardinalities = [4, 7, 5]  # 各类别特征的可能取值数
+    # category features
+    cat_cardinalities = [4, 7, 5]
     n_cat_features = len(cat_cardinalities)
-
-    # 生成类别特征
     x_cat = torch.stack([torch.randint(0, c, (batch_size,)) for c in cat_cardinalities], dim=1)
     print(x_cat)
 
-    # 断言确保数据正确性
-    assert x_cat.dtype == torch.int64
-    assert x_cat.shape == (batch_size, n_cat_features)
-
-    # 独热编码类别特征
+    # One-hot encoding category features
     x_cat_ohe = [F.one_hot(x_cat[:, i], num_classes=cat_cardinalities[i]) for i in range(n_cat_features)]
 
-    # 将连续特征和独热编码的类别特征合并
+    # Merge continuous features and one-hot category features
     x = torch.cat([x_cont] + x_cat_ohe, dim=1)
 
-    # 确认最终数据维度
+
     assert x.shape == (batch_size, n_cont_features + sum(cat_cardinalities))
-    d_out = None  # For example, a single regression task.
-
-    # tab_decoder = FTTransformer( # out dim = [2, 192]
-    # n_cont_features=n_cont_features,
-    # cat_cardinalities=cat_cardinalities,
-    # d_out= None, # neglect final linear layer
-    # n_blocks=3,
-    # d_block=2048,
-    # attention_n_heads=8,
-    # attention_dropout=0.2,
-    # ffn_d_hidden=None,
-    # ffn_d_hidden_multiplier=4 / 3,
-    # ffn_dropout=0.1,
-    # residual_dropout=0.0,
-    # )
-
-    # o = tab_decoder(x_cont, x_cat)
-    # print(o.shape)
 
     cfg = dotdict(
         n_cont_features = 3,
@@ -285,20 +247,8 @@ def run_check_net():
     # print(zi.shape, zt.shape)
     # loss = CLIPLoss(temperature= 0.5)
     lossv, logits, labels = model.forward_Cliploss(zi,zt)
-    print(lossv)
+    # print(lossv)
 
-
-    image = torch.from_numpy(np.random.uniform(0, 1, (batch_size, 3, 224, 224))).float()
-    # model = tiny_vit_21m_224(pretrained=True)
-    # output = model(image)
-    # print(output.shape)
-
-    # device = 'cuda'
-    # top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val = initialize_classifier_and_metrics(batch_size,
-    #                                                                                                batch_size,device)
-    # acctop1 = top1_acc_train(logits,labels)
-    # acctop5 = top5_acc_train(logits,labels)
-    # print(f"acctop1:{acctop1}acctop5:{acctop5}")
 
 # main #################################################################
 if __name__ == '__main__':

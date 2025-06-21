@@ -658,6 +658,8 @@ def tiny_vit_11m_224(pretrained=False, **kwargs):
         num_heads=[2, 4, 8, 14],
         window_sizes=[7, 7, 14, 7],
         drop_path_rate=0.1,
+        in_chans=3,
+        num_classes=0
     )
     model_kwargs.update(kwargs)
     return _create_tiny_vit('tiny_vit_11m_224', pretrained, **model_kwargs)
@@ -671,6 +673,8 @@ def tiny_vit_21m_224(pretrained=False, **kwargs):
         num_heads=[3, 6, 12, 18],
         window_sizes=[7, 7, 14, 7],
         drop_path_rate=0.2,
+        in_chans=1,
+        num_classes=0
     )
     model_kwargs.update(kwargs)
     return _create_tiny_vit('tiny_vit_21m_224', pretrained, **model_kwargs)

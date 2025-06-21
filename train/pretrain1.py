@@ -9,7 +9,6 @@ from torchvision import transforms
 from pathlib import Path
 import json
 import torch.optim as optim
-import torchmetrics
 from torchmetrics.functional import accuracy
 from tqdm import tqdm
 
@@ -17,9 +16,7 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     """
     Load tabular data from a JSON file and convert categorical and continuous data to tensors.
     Also count the number of unique values for each categorical feature (after removing specified keys)
-    and return a list (ordered as in the original cat_tab keys). Additionally, extract the value of
-    "vital_days_after_surgery" from cont_tab for each record into a targets tensor, and in the stored
-    cont_tab set "vital_days_after_surgery" to -1.
+    and return a list (ordered as in the original cat_tab keys).
 
     Parameters:
       json_file: str, the path to the tabular JSON file (e.g. merged_table_data_train.json)
@@ -29,7 +26,6 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     Returns:
       data_dict: dict, in the format { case_id: {"cat_tab": tensor, "cont_tab": tensor} }
       cat_feature_counts: list, the number of unique values for each categorical feature in the order of the keys in cat_tab
-      targets: tensor, containing the "vital_days_after_surgery" values from cont_tab for each record
     """
     if keys_to_skip is None:
         keys_to_skip = []
@@ -93,21 +89,6 @@ def collate_fn(batch):
     images, case_ids = zip(*batch)
     images = torch.stack(images, 0)
     return images, case_ids
-
-
-def initialize_classifier_and_metrics(nclasses_train, nclasses_val, device):
-    """
-    Initializes classifier and metrics. Takes care to set correct number of classes for embedding similarity metric depending on loss.
-    """
-
-    # Accuracy calculated against all others in batch of same view except for self (i.e. -1) and all of the other view
-    top1_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_train).to(device)
-    top1_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=1, num_classes=nclasses_val).to(device)
-
-    top5_acc_train = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_train).to(device)
-    top5_acc_val = torchmetrics.Accuracy(task='multiclass', top_k=5, num_classes=nclasses_val).to(device)
-    return top1_acc_train, top1_acc_val, top5_acc_train, top5_acc_val
-
 
 def calculate_tabular_embedding(model, batchsize, table_train):
     """
@@ -174,6 +155,7 @@ def train_one_epoch(model, train_loader, embedding_tab, optimizer, scaler, DEVIC
 
     Returns:
       epoch_loss: Average loss for the epoch.
+      result of metrics: Average metrics value for the epoch
     """
     model.train()
     running_loss = 0.0
@@ -183,7 +165,6 @@ def train_one_epoch(model, train_loader, embedding_tab, optimizer, scaler, DEVIC
 
     progress_bar = tqdm(total=len(train_loader), desc="Training", leave=False)
     for images, case_ids in train_loader:
-        images= images.repeat(1, 3, 1, 1)
         images = images.to(DEVICE)
         # Extract tabular embeddings for each case_id (create a new leaf tensor)
         batch_tab_emb_list = []
@@ -242,6 +223,7 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
 
     Returns:
       epoch_loss: Average loss for the epoch.
+      result of metrics: Average metrics value for the epoch
     """
     model.eval()
     running_loss = 0.0
@@ -252,7 +234,6 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
     progress_bar = tqdm(total=len(val_loader), desc="Validation", leave=False)
     with torch.no_grad():
         for images, case_ids in val_loader:
-            images = images.repeat(1, 3, 1, 1)
             images = images.to(DEVICE)
             batch_tab_emb_list = []
             for cid in case_ids:
@@ -289,15 +270,18 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
 
 def train():
     current_dir = Path(__file__).resolve().parent
-    data_root = current_dir.parent / "2D Slices 224"
-    keys_to_skip = {"case_id", "vital_status", "intraoperative_complications", "age_when_quit_smoking",
-                    "intraoperative_complications", "comorbidities.myocardial_infarction","comorbidities.congestive_heart_failure",
-                    "comorbidities.peripheral_vascular_disease","comorbidities.cerebrovascular_disease", "comorbidities.dementia",
-                    "comorbidities.copd","comorbidities.connective_tissue_disease","comorbidities.peptic_ulcer_disease",
-                    "comorbidities.diabetes_mellitus_with_end_organ_damage", "comorbidities.hemiplegia_from_stroke",
-                    "comorbidities.leukemia","comorbidities.malignant_lymphoma","comorbidities.metastatic_solid_tumor",
-                    "comorbidities.mild_liver_disease","comorbidities.moderate_to_severe_liver_disease","comorbidities.aids",
-                    "intraoperative_complications.cardiac_event","sarcomatoid_features","rhabdoid_features"}
+    data_root = current_dir.parent / "2D Slices 224 Tumor"
+    keys_to_skip = {"case_id", "vital_status", "age_when_quit_smoking",
+                    "intraoperative_complications",
+                    # "comorbidities.myocardial_infarction","comorbidities.congestive_heart_failure",
+                    # "comorbidities.peripheral_vascular_disease","comorbidities.cerebrovascular_disease", "comorbidities.dementia",
+                    # "comorbidities.copd","comorbidities.connective_tissue_disease","comorbidities.peptic_ulcer_disease",
+                    # "comorbidities.diabetes_mellitus_with_end_organ_damage", "comorbidities.hemiplegia_from_stroke",
+                    # "comorbidities.leukemia","comorbidities.malignant_lymphoma","comorbidities.metastatic_solid_tumor",
+                    # "comorbidities.mild_liver_disease","comorbidities.moderate_to_severe_liver_disease","comorbidities.aids",
+                    "intraoperative_complications.cardiac_event","sarcomatoid_features","rhabdoid_features","aua_risk_score",
+                    "first_postop_egfr.days_after_nephrectomy","first_postop_egfr.value","last_postop_egfr.days_after_nephrectomy",
+                    "last_postop_egfr.value","vital_days_after_surgery"} #"intraoperative_complications",
 
     # Create root
     train_image_json_file = data_root / "train" / "image_data_train.json"
@@ -308,7 +292,6 @@ def train():
     print(cat_cardinalities)
     n_cont_features = len(table_train[0]["cont_tab"])
     # print(n_cont_features)
-
 
     # Create root
     val_image_json_file = data_root / "val" / "image_data_val.json"
@@ -322,18 +305,18 @@ def train():
     transform_train = transforms.Compose([
       transforms.RandomHorizontalFlip(),
       transforms.RandomRotation(45),
-      transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
+      # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
       transforms.ToTensor(),
-      # transforms.RandomResizedCrop(size=img_size, scale=(0.2,1)),
-      # transforms.Lambda(lambda x: x.float()),
+      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
     ])
 
     # Image augmentations for validation
     transform_val = transforms.Compose([
       transforms.ToTensor(),
+      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
     ])
 
-    batchsize = 64
+    batchsize = 128
     batchsizeval = 128
     EPOCHS        = 100
     LEARNING_RATE = 0.003
@@ -350,10 +333,6 @@ def train():
         pin_memory=torch.cuda.is_available(),
         collate_fn= collate_fn
     )
-    # for batch_idx, (images, case_ids) in enumerate(train_loader):
-    #     print(f"Batch {batch_idx}:")
-    #     print("Images tensor shape:", images.shape)  # 例如 (8, 3, 224, 224)
-    #     print("Case IDs:", case_ids)
 
     dataset_val= ImageDataset_1(val_image_json_file, val_image_root,transform=transform_val)
     print("Total number of val images:", len(dataset_val))
@@ -366,20 +345,17 @@ def train():
         collate_fn=collate_fn
     )
 
-    # cfg = dotdict(
-    #     n_cont_features = n_cont_features,
-    #     cat_cardinalities=cat_cardinalities,
-    #     arch = 'resnet34d',
-    #     d_block = 512,
-    # )
 
+    # Set configuration
     cfg = dotdict(
         n_cont_features = n_cont_features,
         cat_cardinalities=cat_cardinalities,
-        arch = 'vision transformer',
+        arch = 'resnet50d',
         d_block = 512,
+        img_dim = 2048  # vit 22M:576,vit 1M:448,resnet:2048
     )
 
+    # Create model
     model = Net(pretrained=True, cfg=cfg).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, eta_min=0.0001)
@@ -388,6 +364,17 @@ def train():
     best_val_top5 = 0.0
     patience = 10
     no_improve_count = 0
+
+    # Create a dict to store training metrics value
+    metrics = {
+        'epoch': [],
+        'train_loss': [],
+        'val_loss': [],
+        'train_top1': [],
+        'train_top5': [],
+        'val_top1': [],
+        'val_top5': []
+    }
 
     for epoch in range(1, EPOCHS + 1):
         start_time = time.time()
@@ -412,12 +399,26 @@ def train():
         print(
             f"Train Acc (Top1): {top1_train:.4f}  | Val Acc (Top1): {top1_val:.4f}  | Train Acc (Top5): {top5_train:.4f}  | Val Acc (Top5): {top5_val:.4f}")
 
+        def to_float(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().item()
+            return float(x)
+
+        # save epoch's result
+        metrics['epoch'].append(epoch)
+        metrics['train_loss'].append(to_float(train_loss))
+        metrics['val_loss'].append(to_float(val_loss))
+        metrics['train_top1'].append(to_float(top1_train))
+        metrics['train_top5'].append(to_float(top5_train))
+        metrics['val_top1'].append(to_float(top1_val))
+        metrics['val_top5'].append(to_float(top5_val))
+
+
         # If the accuracy of the top 1 validation has improved, save the model weights
         if top5_val > best_val_top5:
             best_val_top5 = top5_val
             no_improve_count = 0
-            # save_path = f"best_model_epoch{epoch}_acc{top1_val:.4f}.pth"
-            save_path = f"best_model_acctop1.pth"
+            save_path = f"best_kits23model_acc.pth"
             torch.save(model.state_dict(), save_path)
             print(f"Validation Top5 improved, model weights saved to {save_path}")
         # else:
@@ -426,11 +427,16 @@ def train():
         #     if no_improve_count >= patience:
         #         print(f"No improvement for {patience} consecutive epochs, stopping training.")
         #         break
-        save_path = f"latest_model.pth"
+        save_path = f"latest_kits23model.pth"
         torch.save(model.state_dict(), save_path)
 
         scheduler.step(epoch)
 
+    # save training metrics into a csv file
+    import pandas as pd
+    df_metrics = pd.DataFrame(metrics)
+    df_metrics.to_csv("pretrain_kits23.csv", index=False)
+    print("Saved training metrics to training_metrics.csv")
 
 if __name__ == '__main__':
     train()

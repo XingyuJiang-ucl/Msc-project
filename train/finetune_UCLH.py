@@ -2,7 +2,7 @@ import time
 import torch.nn.functional as F
 from torch.nn.functional import sigmoid
 from torch.utils.data import DataLoader
-from Dataset.Dataset import ImageDataset_1
+from Dataset.Dataset import ImageDataset_1,ImageDataset_2
 from model.finetune_model import Net
 from helper import dotdict
 import torch
@@ -15,19 +15,19 @@ from torchmetrics.functional import mean_squared_error, accuracy,auroc,recall
 from tqdm import tqdm
 
 
-def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
+def load_tabular_data(json_file, target_name, keys_to_skip=None, device='cpu'):
     """
     Load tabular features and binary targets from a JSON file.
 
     Parameters:
-      json_file: str, the path to the tabular JSON file (e.g. merged_table_data_train.json)
-      keys_to_skip: list, keys to skip (e.g. ["case_id"])
-      device: the device on which to store tensors ('cpu' or 'cuda')
+        json_file (str): Path to the JSON file with records.
+        target_name (str): Name of prediction target
+        keys_to_skip (list[str], optional): Field names to ignore. Defaults to None.
+        device (str): Device for output tensors. Defaults to 'cpu'.
 
     Returns:
-      data_dict: dict, in the format { case_id: {"cat_tab": tensor, "cont_tab": tensor} }
-      cat_feature_counts: list, the number of unique values for each categorical feature in the order of the keys in cat_tab
-      targets_dict (dict): Maps case_id to one-hot FloatTensor of the prediction label.
+        data_dict (dict): Maps case_id to {'cat_tab': IntTensor, 'cont_tab': IntTensor}.
+        targets_dict (dict): Maps case_id to one-hot FloatTensor of the prediction label.
     """
     if keys_to_skip is None:
         keys_to_skip = []
@@ -40,24 +40,26 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     cat_unique = {}
     # Record the order of categorical keys (after removing keys_to_skip) from the first encountered record
     ordered_cat_keys = None
-    # Dict to store the label values from cont_tab for each record
+    # Dict to store the labels values from cat_tab for each record
     targets_dict = {}
 
     for record in records:
         case_id = record.get("case_id")
         if case_id is None:
-            continue  # Skip records without a case_id
+            continue
 
         # Process categorical data: copy and remove keys to skip
         cat_data = record.get("cat_tab", {}).copy()
-        # Extract  "aua_risk_score" from cat_data and store it in targets_dict,
-        if "aua_risk_score" in cat_data:
-            target_value = cat_data["aua_risk_score"]
+
+        # Extract  target from cat_data and store it in targets_dict,
+        if target_name in cat_data:
+            target_value = cat_data[target_name]
             target_value = torch.tensor(target_value, dtype=torch.long, device=device)
-            target_value = F.one_hot(target_value, num_classes=5).float()
+            target_value = F.one_hot(target_value, num_classes=2).float()
             targets_dict[case_id] = torch.tensor(target_value, dtype=torch.float, device=device)
         else:
-            targets_dict[case_id] = (torch.zeros(5, device=device))  # If key is missing, store default value -1
+            print("warning")
+            targets_dict[case_id] = (torch.zeros(2, device=device))  # If key is missing, store default value -1
 
         for key in keys_to_skip:
             if key in cat_data:
@@ -79,28 +81,13 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
         for key in keys_to_skip:
             if key in cont_data:
                 del cont_data[key]
-
-        # Convert continuous data to tensor using the original dictionary order
         cont_values = [cont_data[k] for k in cont_data.keys()]
         cont_tensor = torch.tensor(cont_values, dtype=torch.int, device=device)
 
         # Store the tensors in data_dict with case_id as the key
         data_dict[case_id] = {"cat_tab": cat_tensor, "cont_tab": cont_tensor}
 
-    # Count the number of unique values for each categorical feature in the order of ordered_cat_keys
-    cat_feature_counts = []
-    if ordered_cat_keys is not None:
-        for key in ordered_cat_keys:
-            # Use maximum id + 1 as the number of features (assuming feature values are non-negative integers)
-            count = max(cat_unique.get(key, set())) + 1
-            cat_feature_counts.append(count)
-    else:
-        cat_feature_counts = []
-
-    # # Convert the list of target values to a tensor
-    # targets = torch.tensor(targets_dict, dtype=torch.float, device=device)
-
-    return data_dict, cat_feature_counts, targets_dict
+    return data_dict, targets_dict
 
 
 def collate_fn(batch):
@@ -217,10 +204,10 @@ def train_one_epoch(model, train_loader, embedding_tab, labels,optimizer, scaler
         # mseresult = mean_squared_error(results,metric_labels)
 
         # Create metrics calculation object
-        acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro',num_classes=5)
-        acc3 = accuracy(logits, batch_labels, task="multiclass", top_k=3, average='micro',num_classes=5)
-        auc = auroc(logits,batch_labels,task="multiclass", average='macro',num_classes=5)
-        recall_value = recall(logits,batch_labels,task="multiclass", average='macro',num_classes=5)
+        acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro',num_classes=2)
+        acc3 = accuracy(logits, batch_labels, task="multiclass", average='micro',num_classes=2)
+        auc = auroc(logits,batch_labels,task="multiclass", average='macro',num_classes=2)
+        recall_value = recall(logits,batch_labels,task="multiclass", average='macro',num_classes=2)
         # sum_mse += mseresult * batch_size
         sum_top1 += acc1 * batch_size
         sum_top3 += acc3 * batch_size
@@ -245,7 +232,6 @@ def train_one_epoch(model, train_loader, embedding_tab, labels,optimizer, scaler
     total_recall = sum_recall / total_samples
 
     return epoch_loss,  top1_acc, top3_acc, total_auc,total_recall
-
 
 def val_one_epoch(model, val_loader, embedding_tab, labels, DEVICE):
     """
@@ -304,10 +290,10 @@ def val_one_epoch(model, val_loader, embedding_tab, labels, DEVICE):
             # mseresult = mean_squared_error(results, metric_labels)
 
             # Create metrics calculation object
-            acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro', num_classes=5)
-            acc3 = accuracy(logits, batch_labels, task="multiclass", top_k=3, average='micro', num_classes=5)
-            auc = auroc(logits, batch_labels, task="multiclass", average='macro', num_classes=5)
-            recall_value = recall(logits, batch_labels, task="multiclass", average='macro', num_classes=5)
+            acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro', num_classes=2)
+            acc3 = accuracy(logits, batch_labels, task="multiclass", average='micro', num_classes=2)
+            auc = auroc(logits, batch_labels, task="multiclass", average='macro', num_classes=2)
+            recall_value = recall(logits, batch_labels, task="multiclass", average='macro', num_classes=2)
             # sum_mse += mseresult * batch_size
             sum_top1 += acc1 * batch_size
             sum_top3 += acc3 * batch_size
@@ -331,7 +317,7 @@ def val_one_epoch(model, val_loader, embedding_tab, labels, DEVICE):
 
     return epoch_loss, top1_acc, top3_acc,top_auc, total_recall
 
-def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',weight_root = r"D:\Msc project\code\checkpoint\kits23\vit\latest_kits23model.pth"):
+def train(data_root = "UCLH_224_L3_HU1",model_name = 'vision transformer',weight_root = r"D:\Msc project\code\checkpoint\UCLH\1 HU\vit\latest_UCLHmodel_1HU.pth"):
     """
     training pipeline.
 
@@ -342,45 +328,32 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
 
     """
     current_dir = Path(__file__).resolve().parent
-    data_root = current_dir.parent /data_root
-    keys_to_skip = {"case_id", "vital_status", "age_when_quit_smoking",
-                    "intraoperative_complications",
-                    # "comorbidities.myocardial_infarction","comorbidities.congestive_heart_failure",
-                    # "comorbidities.peripheral_vascular_disease","comorbidities.cerebrovascular_disease", "comorbidities.dementia",
-                    # "comorbidities.copd","comorbidities.connective_tissue_disease","comorbidities.peptic_ulcer_disease",
-                    # "comorbidities.diabetes_mellitus_with_end_organ_damage", "comorbidities.hemiplegia_from_stroke",
-                    # "comorbidities.leukemia","comorbidities.malignant_lymphoma","comorbidities.metastatic_solid_tumor",
-                    # "comorbidities.mild_liver_disease","comorbidities.moderate_to_severe_liver_disease","comorbidities.aids",
-                    "intraoperative_complications.cardiac_event","sarcomatoid_features","rhabdoid_features","aua_risk_score",
-                    "first_postop_egfr.days_after_nephrectomy","first_postop_egfr.value","last_postop_egfr.days_after_nephrectomy",
-                    "last_postop_egfr.value","vital_days_after_surgery"} #"intraoperative_complications",
+    data_root = current_dir.parent / data_root
+    keys_to_skip = { 'P-LOS', 'Infectious', 'Pulmonary', 'Renal', 'POMS3>1'}
 
     # Create root
     train_image_json_file = data_root / "train" / "image_data_train.json"
     train_image_root = data_root/ "train"
-    train_table_root = data_root/ "train"/ "merged_table_data_train.json"
+    train_table_root = data_root/ "train"/ "table_data_train.json"
     # Load training data
-    table_train,cat_cardinalities,label_train = load_tabular_data(train_table_root,keys_to_skip)
+    table_train,label_train  = load_tabular_data(train_table_root,'Infectious',keys_to_skip)
     # print(cat_cardinalities)
-    n_cont_features = len(table_train[0]["cont_tab"])
-    # print(n_cont_features)
-
+    n_cont_features = len(table_train[1]["cont_tab"])
+    print(n_cont_features)
 
     # Create root
     val_image_json_file = data_root / "val" / "image_data_val.json"
     val_image_root = data_root/ "val"
-    val_table_root = data_root / "val" / "merged_table_data_val.json"
+    val_table_root = data_root / "val" / "table_data_val.json"
     # Load val data
-    table_val, _ ,label_val= load_tabular_data(val_table_root, keys_to_skip)
-
+    table_val, label_val = load_tabular_data(val_table_root,'Infectious', keys_to_skip)
 
     # Image augmentations for training
     transform_train = transforms.Compose([
       transforms.RandomHorizontalFlip(),
       transforms.RandomRotation(45),
-      # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
       transforms.ToTensor(),
-      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Use when using vit
+      transforms.Lambda(lambda x: x.repeat(3, 1, 1)), # Use when using vit
     ])
 
     # Image augmentations for validation
@@ -418,13 +391,25 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
         collate_fn=collate_fn
     )
 
+    # The number of categories for each category feature
+    cat_dict = {'sex': 2, 'ECG_ischaemia_rest': 2, 'ECG_ischaemia_exercise': 2, 'MI': 2, 'angina': 2, 'coronary_stent': 2, 'CABG': 2,
+                'hypertension': 2, 'cardiac_failure': 2, 'peripheral_vascular_disease': 2, 'CVA_or_TIA': 2, 'diabetes': 2, 'COPD': 2,
+                'asthma': 2, 'pulmonary_embolis': 1, 'pulmonary_fibrosis': 1, 'smoking': 2, 'arthritis': 2, 'beta_blocker': 2,
+                'nitrates': 2, 'ace_inhibitor': 2, 'statins': 2, 'ncepod': 2, 'High Risk Surgery': 2, 'op_severity_SORT': 4,
+                'op_access': 6, 'malignancy': 9, 'asa': 5, 'ethnicity_key': 18, }
+                # 'P-LOS': 2, 'Infectious': 2, 'Pulmonary': 2, 'Renal': 2, 'POMS3>1': 2}
+    cat_cardinalities = []
+    for feat, cnt in cat_dict.items():
+        cat_cardinalities.append(cnt)
+
     # Set configuration
     cfg = dotdict(
         n_cont_features = n_cont_features,
         cat_cardinalities=cat_cardinalities,
-        arch = model_name, #'vision transformer', 'resnet50d'
+        arch = model_name,  #'vision transformer', 'resnet50d'
         d_block = 512,
-        num_classes=5,
+        # att = True,
+        num_classes = 2,
         img_dim=448 if model_name == 'vision transformer' else 2048  # vit 22M:576,vit 1M:448,resnet:2048
     )
 
@@ -497,7 +482,7 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
         if top1_val > best_val_top1:
             best_val_top1 = top1_val
             no_improve_count = 0
-            save_path = f"bestacc_kits23model_finetune.pth"
+            save_path = f"best_finetunemodel_acc_UCLH_HU1.pth"
             torch.save(model.state_dict(), save_path)
             print(f"Validation acc improved, model weights saved to {save_path}")
         else:
@@ -506,7 +491,7 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
             # if no_improve_count >= patience:
             #     print(f"No improvement for {patience} consecutive epochs, stopping training.")
             #     break
-        save_path = f"latest_finetunemodel_kits23.pth"
+        save_path = f"latest_finetunemodel_UCLH_HU1.pth"
         torch.save(model.state_dict(), save_path)
 
         scheduler.step(epoch)
@@ -514,7 +499,7 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
     # save training metrics into a csv file
     import pandas as pd
     df_metrics = pd.DataFrame(metrics)
-    df_metrics.to_csv("finetune_kits23.csv", index=False)
+    df_metrics.to_csv("finetune_UCLH.csv", index=False)
     print("Saved training metrics to training_metrics.csv")
 
 

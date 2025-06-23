@@ -7,9 +7,9 @@ from pathlib import Path
 class ImageDataset_1(Dataset):
     def __init__(self, image_json_file, image_root, transform=None):
         """
+            For CT scans dataset
            Initialization:
            - image_json_file: JSON file containing information for each case
-             (e.g., each record has "case_id" and "folder").
            - image_root: root directory path for all images.
            - transform: optional preprocessing operations to apply to each image.
 
@@ -66,7 +66,7 @@ class ImageDataset_1(Dataset):
 
 class ImageDataset_2(Dataset):
     """
-    Dataset2:
+    Dataset2 (for skin lesion dataset):
     - Accepts `image_root` as a pathlib.Path or string.
     - Automatically walks all subdirectories to collect valid image files.
     - Returns (image_tensor, case_id), where case_id is the image filename.

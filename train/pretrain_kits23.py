@@ -1,23 +1,22 @@
 import time
-import torch.nn.functional as F
-from torch.nn.functional import sigmoid
+
 from torch.utils.data import DataLoader
 from Dataset.Dataset import ImageDataset_1
-from model.finetune_model import Net
+from model.pretrain_model import Net
 from helper import dotdict
 import torch
 from torchvision import transforms
 from pathlib import Path
 import json
 import torch.optim as optim
-import torchmetrics
-from torchmetrics.functional import mean_squared_error, accuracy,auroc,recall
+from torchmetrics.functional import accuracy
 from tqdm import tqdm
-
 
 def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     """
-    Load tabular features and binary targets from a JSON file.
+    Load tabular data from a JSON file and convert categorical and continuous data to tensors.
+    Also count the number of unique values for each categorical feature (after removing specified keys)
+    and return a list (ordered as in the original cat_tab keys).
 
     Parameters:
       json_file: str, the path to the tabular JSON file (e.g. merged_table_data_train.json)
@@ -27,7 +26,6 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     Returns:
       data_dict: dict, in the format { case_id: {"cat_tab": tensor, "cont_tab": tensor} }
       cat_feature_counts: list, the number of unique values for each categorical feature in the order of the keys in cat_tab
-      targets_dict (dict): Maps case_id to one-hot FloatTensor of the prediction label.
     """
     if keys_to_skip is None:
         keys_to_skip = []
@@ -40,25 +38,14 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     cat_unique = {}
     # Record the order of categorical keys (after removing keys_to_skip) from the first encountered record
     ordered_cat_keys = None
-    # Dict to store the label values from cont_tab for each record
-    targets_dict = {}
 
     for record in records:
         case_id = record.get("case_id")
         if case_id is None:
-            continue  # Skip records without a case_id
+            continue
 
         # Process categorical data: copy and remove keys to skip
         cat_data = record.get("cat_tab", {}).copy()
-        # Extract  "aua_risk_score" from cat_data and store it in targets_dict,
-        if "aua_risk_score" in cat_data:
-            target_value = cat_data["aua_risk_score"]
-            target_value = torch.tensor(target_value, dtype=torch.long, device=device)
-            target_value = F.one_hot(target_value, num_classes=5).float()
-            targets_dict[case_id] = torch.tensor(target_value, dtype=torch.float, device=device)
-        else:
-            targets_dict[case_id] = (torch.zeros(5, device=device))  # If key is missing, store default value -1
-
         for key in keys_to_skip:
             if key in cat_data:
                 del cat_data[key]
@@ -79,8 +66,6 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
         for key in keys_to_skip:
             if key in cont_data:
                 del cont_data[key]
-
-        # Convert continuous data to tensor using the original dictionary order
         cont_values = [cont_data[k] for k in cont_data.keys()]
         cont_tensor = torch.tensor(cont_values, dtype=torch.int, device=device)
 
@@ -91,23 +76,19 @@ def load_tabular_data(json_file, keys_to_skip=None, device='cpu'):
     cat_feature_counts = []
     if ordered_cat_keys is not None:
         for key in ordered_cat_keys:
-            # Use maximum id + 1 as the number of features (assuming feature values are non-negative integers)
-            count = max(cat_unique.get(key, set())) + 1
+            # Use maximum id +1 as features' number, because some features may not appear in training dataset
+            count = max(cat_unique.get(key, set())) +1
             cat_feature_counts.append(count)
     else:
         cat_feature_counts = []
 
-    # # Convert the list of target values to a tensor
-    # targets = torch.tensor(targets_dict, dtype=torch.float, device=device)
-
-    return data_dict, cat_feature_counts, targets_dict
+    return data_dict, cat_feature_counts
 
 
 def collate_fn(batch):
     images, case_ids = zip(*batch)
     images = torch.stack(images, 0)
     return images, case_ids
-
 
 def calculate_tabular_embedding(model, batchsize, table_train):
     """
@@ -156,21 +137,9 @@ def calculate_tabular_embedding(model, batchsize, table_train):
     return embedding_dict
 
 
-def train_one_epoch(model, train_loader, embedding_tab, labels,optimizer, scaler, DEVICE):
+def train_one_epoch(model, train_loader, embedding_tab, optimizer, scaler, DEVICE):
     """
     Trains the model for one epoch using mixed precision.
-
-    Steps:
-      - Reads (images, case_ids) from train_loader.
-      - Moves images to DEVICE and computes image embeddings via model.forward_image().
-      - For each case_id in the batch, extracts the corresponding tabular embedding
-        from embedding_tab. For each case_id, calls .detach().clone().requires_grad_()
-        to create a new leaf tensor and moves it to DEVICE.
-      - Retrieves the corresponding target values from the targets dictionary
-        (mapping case_id to target value) and creates a batch tensor.
-      - Calls model.forward_loss(emb_image, batch_tab_emb, batch_targets) to compute the loss.
-      - Uses scaler for mixed precision backward and optimizer update.
-      - Uses tqdm to monitor progress and display the current loss.
 
     Returns:
       epoch_loss: Average loss for the epoch.
@@ -180,29 +149,22 @@ def train_one_epoch(model, train_loader, embedding_tab, labels,optimizer, scaler
     running_loss = 0.0
     total_samples = 0
     sum_top1 = 0.0
-    sum_top3 = 0.0
-    sum_auc = 0.0
-    sum_recall = 0.0
+    sum_top5 = 0.0
 
     progress_bar = tqdm(total=len(train_loader), desc="Training", leave=False)
     for images, case_ids in train_loader:
         images = images.to(DEVICE)
         # Extract tabular embeddings for each case_id (create a new leaf tensor)
         batch_tab_emb_list = []
-        batch_labels_list = []
         for cid in case_ids:
             tab_emb = embedding_tab[cid].detach().clone().requires_grad_().to(DEVICE)
             batch_tab_emb_list.append(tab_emb)
-            batch_labels_list.append(labels[cid].argmax())
         batch_tab_emb = torch.stack(batch_tab_emb_list, dim=0)
-        batch_labels = torch.stack(batch_labels_list, dim=0).to(DEVICE)
-        #metric_labels = batch_labels * max_vitals
 
         optimizer.zero_grad()
         with torch.cuda.amp.autocast():
             emb_image = model.forward_image(images)
-            logits, loss = model.forward_loss(emb_image, batch_tab_emb,batch_labels)
-        # results = logits * max_vitals
+            loss, logits, labels = model.forward_Cliploss(emb_image, batch_tab_emb)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -211,55 +173,31 @@ def train_one_epoch(model, train_loader, embedding_tab, labels,optimizer, scaler
         running_loss += loss.item() * batch_size
         total_samples += batch_size
 
-        ## Use functional API to dynamically specify num_classes as the number of samples in the current batch
-        # current_num_classes = images.size(0) # for fake label
+        #Use functional API to dynamically specify num_classes as the number of samples in the current batch
+        current_num_classes = images.size(0) # for fake label
         # current_num_classes = len(torch.unique(labels))
-        # mseresult = mean_squared_error(results,metric_labels)
-
-        # Create metrics calculation object
-        acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro',num_classes=5)
-        acc3 = accuracy(logits, batch_labels, task="multiclass", top_k=3, average='micro',num_classes=5)
-        auc = auroc(logits,batch_labels,task="multiclass", average='macro',num_classes=5)
-        recall_value = recall(logits,batch_labels,task="multiclass", average='macro',num_classes=5)
-        # sum_mse += mseresult * batch_size
+        acc1 = accuracy(logits, labels, task="multiclass", num_classes=current_num_classes)
+        acc5 = accuracy(logits, labels, task="multiclass", top_k=5, num_classes=current_num_classes)
         sum_top1 += acc1 * batch_size
-        sum_top3 += acc3 * batch_size
-        sum_auc += auc * batch_size
-        sum_recall += recall_value * batch_size
-
+        sum_top5 += acc5 * batch_size
 
         # Set tqdm bar
         progress_bar.set_postfix(loss=loss.item(),
                                  top1=acc1.item(),
-                                 top3=acc3.item(),
-                                 auc = auc.item(),
-                                 recall = recall_value.item())
+                                 top5=acc5.item())
         progress_bar.update(1)
     progress_bar.close()
 
     epoch_loss = running_loss / total_samples
-    # avg_mse = sum_mse / total_samples
     top1_acc = sum_top1 / total_samples
-    top3_acc = sum_top3 / total_samples
-    total_auc = sum_auc / total_samples
-    total_recall = sum_recall / total_samples
+    top5_acc = sum_top5 / total_samples
 
-    return epoch_loss,  top1_acc, top3_acc, total_auc,total_recall
+    return epoch_loss, top1_acc, top5_acc
 
 
-def val_one_epoch(model, val_loader, embedding_tab, labels, DEVICE):
+def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
     """
     Validates the model for one epoch using mixed precision.
-
-    Steps:
-      - Reads (images, case_ids) from val_loader.
-      - Moves images to DEVICE and computes image embeddings via model.forward_image().
-      - For each case_id in the batch, extracts the corresponding tabular embedding from
-        embedding_tab by calling .detach().clone() and moves it to DEVICE.
-      - Retrieves the corresponding target values from the targets dictionary and creates
-        a batch targets tensor.
-      - Calls model.forward_loss(emb_image, batch_tab_emb, batch_targets) to compute the loss.
-      - Uses tqdm to monitor progress and display the current loss.
 
     Returns:
       epoch_loss: Average loss for the epoch.
@@ -268,81 +206,49 @@ def val_one_epoch(model, val_loader, embedding_tab, labels, DEVICE):
     model.eval()
     running_loss = 0.0
     total_samples = 0
-    # max_vital_day = 7450
-    # sum_mse = 0.0
     sum_top1 = 0.0
-    sum_top3 = 0.0
-    sum_auc = 0.0
-    sum_recall = 0.0
+    sum_top5 = 0.0
 
     progress_bar = tqdm(total=len(val_loader), desc="Validation", leave=False)
     with torch.no_grad():
         for images, case_ids in val_loader:
             images = images.to(DEVICE)
             batch_tab_emb_list = []
-            batch_labels_list = []
             for cid in case_ids:
                 tab_emb = embedding_tab[cid].detach().clone().to(DEVICE)
                 batch_tab_emb_list.append(tab_emb)
-                batch_labels_list.append(labels[cid].argmax())
             batch_tab_emb = torch.stack(batch_tab_emb_list, dim=0)
-            batch_labels = torch.stack(batch_labels_list, dim=0).to(DEVICE)
-            # metric_labels = batch_labels * max_vital_day
 
             with torch.cuda.amp.autocast():
                 emb_image = model.forward_image(images)
-                logits,loss = model.forward_loss(emb_image, batch_tab_emb,batch_labels,output_type='loss')
+                loss, logits, labels = model.forward_Cliploss(emb_image, batch_tab_emb)
 
-            # results = logits * max_vital_day
             batch_size = images.size(0)
             running_loss += loss.item() * batch_size
             total_samples += batch_size
 
-            ## Use functional API to dynamically specify num_classes as the number of samples in the current batch
-            # current_num_classes = images.size(0) # for fake label
+            current_num_classes = images.size(0) # For fake label
             # current_num_classes = len(torch.unique(labels))
-            # mseresult = mean_squared_error(results, metric_labels)
-
-            # Create metrics calculation object
-            acc1 = accuracy(logits, batch_labels, task="multiclass", average='micro', num_classes=5)
-            acc3 = accuracy(logits, batch_labels, task="multiclass", top_k=3, average='micro', num_classes=5)
-            auc = auroc(logits, batch_labels, task="multiclass", average='macro', num_classes=5)
-            recall_value = recall(logits, batch_labels, task="multiclass", average='macro', num_classes=5)
-            # sum_mse += mseresult * batch_size
+            acc1 = accuracy(logits, labels, task="multiclass", num_classes=current_num_classes)
+            acc5 = accuracy(logits, labels, task="multiclass", top_k=5, num_classes=current_num_classes)
             sum_top1 += acc1 * batch_size
-            sum_top3 += acc3 * batch_size
-            sum_auc += auc * batch_size
-            sum_recall += recall_value * batch_size
+            sum_top5 += acc5 * batch_size
 
-            # Set tqdm bar
             progress_bar.set_postfix(loss=loss.item(),
                                      top1=acc1.item(),
-                                     top3=acc3.item(),
-                                     auc = auc.item(),
-                                     recall = recall_value.item())
+                                     top5=acc5.item())
             progress_bar.update(1)
     progress_bar.close()
 
     epoch_loss = running_loss / total_samples
     top1_acc = sum_top1 / total_samples
-    top3_acc = sum_top3 / total_samples
-    top_auc = sum_auc / total_samples
-    total_recall = sum_recall / total_samples
+    top5_acc = sum_top5 / total_samples
 
-    return epoch_loss, top1_acc, top3_acc,top_auc, total_recall
+    return epoch_loss, top1_acc, top5_acc
 
-def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',weight_root = r"D:\Msc project\code\checkpoint\kits23\vit\latest_kits23model.pth"):
-    """
-    training pipeline.
-
-    Parameters:
-    data_root: folder name which store training and validation data
-    model_name: name of image encoder, vision transformer or resnet50d
-    weight_root: path of pretrain weight
-
-    """
+def train():
     current_dir = Path(__file__).resolve().parent
-    data_root = current_dir.parent /data_root
+    data_root = current_dir.parent / "2D Slices 224 Tumor"
     keys_to_skip = {"case_id", "vital_status", "age_when_quit_smoking",
                     "intraoperative_complications",
                     # "comorbidities.myocardial_infarction","comorbidities.congestive_heart_failure",
@@ -360,18 +266,17 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
     train_image_root = data_root/ "train"
     train_table_root = data_root/ "train"/ "merged_table_data_train.json"
     # Load training data
-    table_train,cat_cardinalities,label_train = load_tabular_data(train_table_root,keys_to_skip)
-    # print(cat_cardinalities)
+    table_train,cat_cardinalities = load_tabular_data(train_table_root,keys_to_skip)
+    print(cat_cardinalities)
     n_cont_features = len(table_train[0]["cont_tab"])
     # print(n_cont_features)
-
 
     # Create root
     val_image_json_file = data_root / "val" / "image_data_val.json"
     val_image_root = data_root/ "val"
     val_table_root = data_root / "val" / "merged_table_data_val.json"
     # Load val data
-    table_val, _ ,label_val= load_tabular_data(val_table_root, keys_to_skip)
+    table_val, _ = load_tabular_data(val_table_root, keys_to_skip)
 
 
     # Image augmentations for training
@@ -380,19 +285,19 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
       transforms.RandomRotation(45),
       # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
       transforms.ToTensor(),
-      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Use when using vit
+      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
     ])
 
     # Image augmentations for validation
     transform_val = transforms.Compose([
       transforms.ToTensor(),
-      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Use when using vit
+      transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
     ])
 
     batchsize = 128
     batchsizeval = 128
-    EPOCHS        = 50
-    LEARNING_RATE = 0.0003
+    EPOCHS        = 100
+    LEARNING_RATE = 0.003
     DEVICE = torch.device('cuda')
 
     dataset_train = ImageDataset_1(train_image_json_file, train_image_root, transform=transform_train)
@@ -418,27 +323,24 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
         collate_fn=collate_fn
     )
 
+
     # Set configuration
     cfg = dotdict(
         n_cont_features = n_cont_features,
         cat_cardinalities=cat_cardinalities,
-        arch = model_name, #'vision transformer', 'resnet50d'
+        arch = 'resnet50d',
         d_block = 512,
-        num_classes=5,
-        img_dim=448 if model_name == 'vision transformer' else 2048  # vit 22M:576,vit 1M:448,resnet:2048
+        img_dim = 2048  # vit 22M:576,vit 1M:448,resnet:2048
     )
 
     # Create model
-    model = Net(pretrained=False, cfg=cfg).to(DEVICE)
-    if weight_root:
-        pretrained_dict = torch.load(weight_root,weights_only= True)
-        model.load_state_dict(pretrained_dict,strict=False)
+    model = Net(pretrained=True, cfg=cfg).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, eta_min=0.0001)
     scaler    = torch.cuda.amp.GradScaler()  # For automatic mixed precision
 
-    best_val_top1 = 0.0
-    patience = 20
+    best_val_top5 = 0.0
+    patience = 10
     no_improve_count = 0
 
     # Create a dict to store training metrics value
@@ -447,11 +349,9 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
         'train_loss': [],
         'val_loss': [],
         'train_top1': [],
-        'train_recall': [],
-        'train_auc': [],
+        'train_top5': [],
         'val_top1': [],
-        'val_recall': [],
-        'val_auc': [],
+        'val_top5': []
     }
 
     for epoch in range(1, EPOCHS + 1):
@@ -459,54 +359,53 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
 
         print(f"\n===== EPOCH {epoch}/{EPOCHS} =====")
 
-        # Calculate tabular embedding
+        # calculate tabular embedding
         model.eval()
         embedding_tab_train = calculate_tabular_embedding(model, batchsize, table_train)
         embedding_tab_val = calculate_tabular_embedding(model, batchsizeval, table_val)
 
         # train
-        train_loss, top1_train, top3_train, train_auc, train_recall = train_one_epoch(model, train_loader,
-                                                                                      embedding_tab_train,
-                                                                                      label_train, optimizer, scaler,
-                                                                                        DEVICE)
+        train_loss, top1_train, top5_train = train_one_epoch(model, train_loader, embedding_tab_train, optimizer, scaler,
+                                                             DEVICE)
 
-        # validation
-        val_loss, top1_val, top3_val, val_auc,val_recall = val_one_epoch(model, val_loader, embedding_tab_val, label_val, DEVICE)
+        # validate
+        val_loss, top1_val, top5_val = val_one_epoch(model, val_loader, embedding_tab_val, DEVICE)
 
         elapsed = time.time() - start_time
+
         print(f"Train Loss: {train_loss:.4f}  | Val Loss: {val_loss:.4f} | Time: {elapsed:.1f}s")
-        print(f"Train Recall: {train_recall:.4f} | Train AUC:{train_auc:.4f} | Train Acc (Top1): {top1_train:.4f} | Train Acc (Top3): {top3_train:.4f} ")
-        print(f"Val Recall: {val_recall:.4f} | Val AUC: {val_auc:.4f} | Val Acc (Top1): {top1_val:.4f} | Val Acc (Top3): {top3_val:.4f}")
+        print(
+            f"Train Acc (Top1): {top1_train:.4f}  | Val Acc (Top1): {top1_val:.4f}  | Train Acc (Top5): {top5_train:.4f}  | Val Acc (Top5): {top5_val:.4f}")
 
         def to_float(x):
             if isinstance(x, torch.Tensor):
                 return x.detach().cpu().item()
             return float(x)
+
         # save epoch's result
         metrics['epoch'].append(epoch)
         metrics['train_loss'].append(to_float(train_loss))
         metrics['val_loss'].append(to_float(val_loss))
         metrics['train_top1'].append(to_float(top1_train))
-        metrics['train_recall'].append(to_float(train_recall))
-        metrics['train_auc'].append(to_float(train_auc))
+        metrics['train_top5'].append(to_float(top5_train))
         metrics['val_top1'].append(to_float(top1_val))
-        metrics['val_recall'].append(to_float(val_recall))
-        metrics['val_auc'].append(to_float(val_auc))
+        metrics['val_top5'].append(to_float(top5_val))
 
-        # save pth if validation acc improve
-        if top1_val > best_val_top1:
-            best_val_top1 = top1_val
+
+        # If the accuracy of the top 1 validation has improved, save the model weights
+        if top5_val > best_val_top5:
+            best_val_top5 = top5_val
             no_improve_count = 0
-            save_path = f"bestacc_kits23model_finetune.pth"
+            save_path = f"best_kits23model_acc.pth"
             torch.save(model.state_dict(), save_path)
-            print(f"Validation acc improved, model weights saved to {save_path}")
-        else:
-            no_improve_count += 1
-            print(f"No improvement for {no_improve_count} epoch(s).")
-            # if no_improve_count >= patience:
-            #     print(f"No improvement for {patience} consecutive epochs, stopping training.")
-            #     break
-        save_path = f"latest_finetunemodel_kits23.pth"
+            print(f"Validation Top5 improved, model weights saved to {save_path}")
+        # else:
+        #     no_improve_count += 1
+        #     print(f"No improvement for {no_improve_count} epoch(s).")
+        #     if no_improve_count >= patience:
+        #         print(f"No improvement for {patience} consecutive epochs, stopping training.")
+        #         break
+        save_path = f"latest_kits23model.pth"
         torch.save(model.state_dict(), save_path)
 
         scheduler.step(epoch)
@@ -514,9 +413,8 @@ def train(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer',we
     # save training metrics into a csv file
     import pandas as pd
     df_metrics = pd.DataFrame(metrics)
-    df_metrics.to_csv("finetune_kits23.csv", index=False)
+    df_metrics.to_csv("pretrain_kits23.csv", index=False)
     print("Saved training metrics to training_metrics.csv")
-
 
 if __name__ == '__main__':
     train()

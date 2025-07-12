@@ -31,13 +31,13 @@ class CrossAttention(nn.Module):
         self.attn = nn.MultiheadAttention(dim, n_heads, dropout=dropout)
         self.drop_path = nn.Identity()
 
-    def forward(self, x_k, x_qv):
-        k = x_k.transpose(0, 1)
-        q = x_qv.transpose(0, 1)
-        v = q
+    def forward(self, x_q, x_kv):
+        q = x_q.transpose(0,1)
+        k = x_kv.transpose(0,1)
+        v = k
         attn_out, _ = self.attn(q, k, v)
         attn_out = attn_out.transpose(0,1)
-        return x_k + self.drop_path(attn_out)
+        return x_q + self.drop_path(attn_out)
 
 class MultiModalLayer(nn.Module):
     def __init__(self, dim, n_heads, dropout=0.0):

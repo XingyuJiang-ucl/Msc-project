@@ -42,12 +42,6 @@ class CrossAttention(nn.Module):
         return x_q + self.drop_path(attn_out)
 
 class MultiModalLayer(nn.Module):
-    """
-    1) Self-Attn
-    2) LayerNorm
-    3) Cross-Attn
-    4) optional Fusion
-    """
     def __init__(self, dim, n_heads, dropout=0.0):
         super().__init__()
         self.img_self   = SelfAttention(dim, n_heads, dropout)

@@ -67,36 +67,34 @@ def compute_cont_stats(types, values):
                 stats[feature] = (min(non_null), max(non_null))
     return stats
 
-
-def transform(records, types, maps, stats, values):
+def transform(records, types, maps, stats):
     """
     Transform records:
-    - Sample missing values from non-null values
-    - Normalize continuous features to [0,1]
-    - Encode categorical features to integers
+    - Impute missing continuous features with -1 and categorical features with 0.
+    - Normalize non-missing continuous features to [0,1].
+    - Encode non-missing categorical features to integers.
     """
     transformed = []
     for rec in records:
         flat = {}
         for feat, val in rec.items():
             ftype = types.get(feat, 'unknown')
-            if val is None:
-                non_null = [v for v in values[feat] if v is not None]
-                if non_null:
-                    val = random.choice(non_null)
+
             if ftype == 'continuous':
-                if isinstance(val, (int, float)):
+                if val is not None:
                     min_v, max_v = stats.get(feat, (0, 0))
                     if max_v != min_v:
                         flat[feat] = (val - min_v) / (max_v - min_v)
                     else:
                         flat[feat] = 0.0
                 else:
-                    flat[feat] = -1
+                    flat[feat] = -1.0
             elif ftype in ('categorical_bool', 'categorical_str'):
                 flat[feat] = maps.get(feat, {}).get(val, 0)
+
             else:
-                flat[feat] = val if val is not None else -1
+                flat[feat] = -1.0 if val is None else val
+
         transformed.append(flat)
     return transformed
 
@@ -115,7 +113,8 @@ def main():
     types, values = detect_feature_types(flat)
     maps = build_mappings(types, values)
     stats = compute_cont_stats(types, values)
-    transformed = transform(flat, types, maps, stats, values)
+
+    transformed = transform(flat, types, maps, stats)
 
     train_img, val_img, test_img = [], [], []
     train_tab, val_tab, test_tab = [], [], []
@@ -132,7 +131,7 @@ def main():
     for rec in transformed:
         cid = rec.get('case_id')
         cont = {f: rec[f] for f, t in types.items() if t == 'continuous'}
-        cat  = {f: rec[f] for f, t in types.items() if t in ('categorical_bool', 'categorical_str')}
+        cat = {f: rec[f] for f, t in types.items() if t in ('categorical_bool', 'categorical_str')}
         entry = {'case_id': cid, 'cat_tab': cat, 'cont_tab': cont}
         if 400 <= cid <= 488:
             test_tab.append(entry)
@@ -154,6 +153,7 @@ def main():
         json.dump(val_tab, f, indent=2)
     with open('table_data_test.json', 'w', encoding='utf-8') as f:
         json.dump(test_tab, f, indent=2)
+
 
 if __name__ == '__main__':
     main()

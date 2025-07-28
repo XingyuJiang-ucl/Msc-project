@@ -128,18 +128,6 @@ def train_one_epoch(model, train_loader, embedding_tab, optimizer, scaler, DEVIC
     """
     Trains the model for one epoch using mixed precision.
 
-    Steps:
-      - Reads (images, case_ids) from train_loader.
-      - Moves images to DEVICE and computes image embeddings via model.forward_image().
-      - For each case_id in the batch, extracts the corresponding tabular embedding
-        from embedding_tab. For each case_id, calls .detach().clone().requires_grad_()
-        to create a new leaf tensor and moves it to DEVICE.
-      - Retrieves the corresponding target values from the targets dictionary
-        (mapping case_id to target value) and creates a batch tensor.
-      - Calls model.forward_loss(emb_image, batch_tab_emb, batch_targets) to compute the loss.
-      - Uses scaler for mixed precision backward and optimizer update.
-      - Uses tqdm to monitor progress and display the current loss.
-
     Returns:
       epoch_loss: Average loss for the epoch.
       result of metrics: Average metrics value for the epoch
@@ -199,16 +187,6 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
     """
     Validates the model for one epoch using mixed precision.
 
-    Steps:
-      - Reads (images, case_ids) from val_loader.
-      - Moves images to DEVICE and computes image embeddings via model.forward_image().
-      - For each case_id in the batch, extracts the corresponding tabular embedding from
-        embedding_tab by calling .detach().clone() and moves it to DEVICE.
-      - Retrieves the corresponding target values from the targets dictionary and creates
-        a batch targets tensor.
-      - Calls model.forward_loss(emb_image, batch_tab_emb, batch_targets) to compute the loss.
-      - Uses tqdm to monitor progress and display the current loss.
-
     Returns:
       epoch_loss: Average loss for the epoch.
       result of metrics: Average metrics value for the epoch
@@ -257,7 +235,7 @@ def val_one_epoch(model, val_loader, embedding_tab, DEVICE):
 
     return epoch_loss, top1_acc, top5_acc
 
-def inference():
+def train():
     current_dir = Path(__file__).resolve().parent
     data_root = current_dir.parent / "skin 224"
     keys_to_skip = {"case_id","patient_id",'diagnostic'}

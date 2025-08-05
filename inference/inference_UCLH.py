@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch.nn.functional import sigmoid
 from torch.utils.data import DataLoader
 from Dataset.Dataset import ImageDataset_1,ImageDataset_2
-from model.finetune_model import Net
+from model.finetune_attmodel import Net
 from helper import dotdict
 import torch
 from torchvision import transforms
@@ -290,7 +290,7 @@ def inference(data_root = "UCLH_224_L3_HU1",model_name = 'vision transformer',we
     # Create root
     train_table_root = data_root/ "train"/ "table_data_train.json"
     # Load training data
-    table_train,label_train  = load_tabular_data(train_table_root, 'Infectious',keys_to_skip)
+    table_train,label_train  = load_tabular_data(train_table_root, 'Renal',keys_to_skip)
     # print(cat_cardinalities)
     n_cont_features = len(table_train[1]["cont_tab"])
     print(n_cont_features)
@@ -300,7 +300,7 @@ def inference(data_root = "UCLH_224_L3_HU1",model_name = 'vision transformer',we
     test_image_root = data_root / "test"
     test_table_root = data_root / "test" / "table_data_test.json"
     # Load val data
-    table_test, label_test = load_tabular_data(test_table_root, 'Infectious', keys_to_skip)
+    table_test, label_test = load_tabular_data(test_table_root, 'Renal', keys_to_skip)
 
     # Image augmentations for validation
     transform_test = transforms.Compose([
@@ -314,7 +314,7 @@ def inference(data_root = "UCLH_224_L3_HU1",model_name = 'vision transformer',we
 
     # for batch_idx, (images, case_ids) in enumerate(train_loader):
     #     print(f"Batch {batch_idx}:")
-    #     print("Images tensor shape:", images.shape)  # 例如 (8, 3, 224, 224)
+    #     print("Images tensor shape:", images.shape)
     #     print("Case IDs:", case_ids)
 
     dataset_test= ImageDataset_1(test_image_json_file, test_image_root, transform=transform_test)
@@ -344,7 +344,7 @@ def inference(data_root = "UCLH_224_L3_HU1",model_name = 'vision transformer',we
         arch = model_name,
         d_block = 512,
         num_classes = 2,
-        # att=True,
+        att=True,
         img_dim=448 if model_name == 'vision transformer' else 2048  # vit 22M:576,vit 1M:448,resnet:2048
     )
 

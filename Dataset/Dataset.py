@@ -105,7 +105,6 @@ class ImageDataset_2(Dataset):
             (image_tensor, case_id)
         """
         sample = self.samples[index]
-        # Path 转为 str 以兼容 PIL 打开
         img = Image.open(str(sample["image_path"])).convert("L")
         if self.transform:
             img = self.transform(img)

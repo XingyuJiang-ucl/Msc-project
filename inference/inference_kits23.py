@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch.nn.functional import sigmoid
 from torch.utils.data import DataLoader
 from Dataset.Dataset import ImageDataset_1
-from model.finetune_model import Net
+from model.finetune_attmodel import Net
 from helper import dotdict
 import torch
 from torchvision import transforms
@@ -367,6 +367,7 @@ def inference(data_root = "2D Slices 224 Tumor",model_name = 'vision transformer
         arch = model_name,
         d_block = 512,
         num_classes=5,
+        att=True,
         img_dim=448 if model_name == 'vision transformer' else 2048  # vit 22M:576,vit 1M:448,resnet:2048
     )
 
